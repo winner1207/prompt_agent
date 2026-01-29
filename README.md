@@ -1,10 +1,10 @@
-# 易景Prompt智能体 (Prompt Agent)
+# Prompt智能体 (Prompt Agent)
 
 基于 LangGraph 和 Reflexion 模式的专业提示词优化工程智能体。
 
 ## 🚀 项目简介
 
-易景Prompt智能体是一个全栈 AI 应用，旨在通过多智能体协同工作流（Analyzer-Generator-Reflector），将用户的模糊想法转化为结构化、专业且符合 CO-STAR 原则的高质量提示词。
+Prompt智能体是一个全栈 AI 应用，旨在通过多智能体协同工作流（Analyzer-Generator-Reflector），将用户的模糊想法转化为结构化、专业且符合 CO-STAR 原则的高质量提示词。
 
 ### 核心特性
 
