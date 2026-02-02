@@ -6,6 +6,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from agent.graph import app_graph
+from agent.nodes import parse_llm_response
 from tools.pg_saver import pg_saver
 from tools.logger import log
 
@@ -64,7 +65,9 @@ async def optimize_prompt(request: Request):
                     node_name = event.get("metadata", {}).get("langgraph_node")
                     # 我们只在优化阶段（generator）展示流式吐字，或者全部展示
                     if node_name == "generator":
-                        token = event["data"]["chunk"].content
+                        content = event["data"]["chunk"].content
+                        # 物理隔离：调用统一解析器
+                        token = parse_llm_response(content)
                         if token:
                             yield f"data: {json.dumps({'node': node_name, 'status': 'token', 'token': token})}\n\n"
 

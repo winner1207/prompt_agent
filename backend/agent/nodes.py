@@ -1,33 +1,20 @@
 import os
-import requests
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableConfig
 from langchain_core.output_parsers import JsonOutputParser
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from .schema import AgentState
+from llm.llm_gemini import check_gemini_available, get_gemini_llm, parse_gemini_response
+from llm.llm_deepseek import get_deepseek_llm, parse_deepseek_response
 from tools.pg_saver import pg_saver
 from tools.rag_tool import rag_retriever
 from tools.logger import log
 
 load_dotenv()
 
-def extract_text(content):
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        texts = []
-        for item in content:
-            if isinstance(item, dict) and 'text' in item:
-                texts.append(item['text'])
-            else:
-                texts.append(str(item))
-        return ''.join(texts)
-    return str(content)
 def load_prompt(filename):
-    path = os.path.join(os.path.dirname(__file__), "prompts", filename)
+    path = os.path.join(os.path.dirname(__file__), "..", "prompts", filename)
     with open(path, "r", encoding="utf-8") as f:
         return f.read()
 
@@ -41,61 +28,24 @@ class ReflectorResponse(BaseModel):
     is_perfect: bool = Field(description="提示词是否已经达到行业天花板级别，无需进一步修改")
 
 # 初始化不同角色的 LLM 实例
-def _check_gemini_available():
-    """检查 Gemini API 是否可用"""
-    try:
-        api_key = os.getenv("GOOGLE_API_KEY")
-        if not api_key:
-            log("[LLM] GOOGLE_API_KEY 未配置，使用 DeepSeek", level="WARNING")
-            return False
-        
-        # 设置代理
-        proxies = {}
-        if os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY"):
-            proxy_url = os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
-            proxies = {"http": proxy_url, "https": proxy_url}
-        
-        # 发送简单的测试请求
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key={api_key}"
-        headers = {"Content-Type": "application/json"}
-        data = {"contents": [{"parts": [{"text": "test"}]}]}
-        
-        response = requests.post(url, headers=headers, json=data, proxies=proxies, timeout=5)
-        
-        if response.status_code == 200:
-            log("[LLM] Gemini API 可用 ✓", level="INFO")
-            return True
-        else:
-            log(f"[LLM] Gemini API 检查失败 (状态码: {response.status_code})，使用 DeepSeek", level="WARNING")
-            return False
-    except Exception as e:
-        log(f"[LLM] Gemini API 连接异常: {e}，使用 DeepSeek", level="WARNING")
-        return False
-
-# 全局标志：是否使用 Gemini
-_use_gemini = _check_gemini_available()
+_use_gemini = check_gemini_available()
+if _use_gemini:
+    log("[LLM] Gemini API 可用 ✓", level="INFO")
+else:
+    log("[LLM] Gemini API 不可用，已回退至 DeepSeek", level="WARNING")
 
 def get_llm(temperature=0.7):
-    """获取 LLM 实例，支持 Gemini 优先、DeepSeek 回退"""
-    # 确保 Python 进程能读到代理配置
-    if not os.environ.get("HTTPS_PROXY"):
-        os.environ["HTTPS_PROXY"] = "http://10.100.2.21:7897"
-        os.environ["HTTP_PROXY"] = "http://10.100.2.21:7897"
-    
+    """获取 LLM 实例，策略：Gemini 优先，DeepSeek 备选"""
     if _use_gemini:
-        return ChatGoogleGenerativeAI(
-            model=os.getenv("LLM_MODEL", "gemini-3-flash-preview"),
-            google_api_key=os.getenv("GOOGLE_API_KEY"),
-            temperature=float(temperature)
-        )
-    else:
-        # 回退到 DeepSeek
-        return ChatOpenAI(
-            model="deepseek-chat",
-            openai_api_key=os.getenv("DEEPSEEK_API_KEY"),
-            openai_api_base=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
-            temperature=float(temperature)
-        )
+        return get_gemini_llm(temperature)
+    return get_deepseek_llm(temperature)
+
+def parse_llm_response(content):
+    """统一解析入口，根据当前使用的模型调用对应的解析实现"""
+    if _use_gemini:
+        return parse_gemini_response(content)
+    return parse_deepseek_response(content)
+
 
 analyzer_llm = get_llm(os.getenv("ANALYZER_TEMPERATURE", 0.3))
 generator_llm = get_llm(os.getenv("GENERATOR_TEMPERATURE", 0.7))
@@ -113,8 +63,8 @@ async def analyzer_node(state: AgentState, config: RunnableConfig):
     chain = prompt | analyzer_llm
     response = await chain.ainvoke({"original_prompt": state["original_prompt"]})
     
-    # 提取文本（处理 Gemini 返回的列表格式）
-    text_content = extract_text(response.content)
+    # 提取文本（物理隔离：由 parse_llm_response 路由到具体实现）
+    text_content = parse_llm_response(response.content)
     
     # 保存进度到数据库
     await pg_saver.save_step(
@@ -141,7 +91,7 @@ async def generator_node(state: AgentState, config: RunnableConfig):
     # 将 user_intent 转换为字符串（处理 Gemini 返回的列表格式）
     user_intent_str = state["user_intent"]
     if isinstance(user_intent_str, list):
-        user_intent_str = extract_text(user_intent_str)
+        user_intent_str = parse_llm_response(user_intent_str)
     
     # 1. 执行 RAG 检索：根据用户意图匹配模板
     matched_template = "无匹配的企业级参考模板"
@@ -171,7 +121,7 @@ async def generator_node(state: AgentState, config: RunnableConfig):
     })
     
     # 提取文本内容
-    improved_text = extract_text(response.content)
+    improved_text = parse_llm_response(response.content)
     
     # 保存进度到数据库
     await pg_saver.save_step(
